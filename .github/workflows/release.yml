@@ -1,0 +1,93 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Grant execute permission for Gradle
+        run: chmod +x ./gradlew
+
+      - name: Setup Android SDK (cmdline-tools)
+        env:
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+          ANDROID_HOME: ${{ github.workspace }}/android-sdk
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT"
+          curl -L -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+
+      - name: Install required Android packages
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "cmake;3.22.1" "ndk;25.1.8937393"
+
+      - name: Download OpenCV Android SDK
+        run: |
+          curl -L -o opencv-android-sdk.zip https://github.com/opencv/opencv/releases/download/4.9.0/opencv-4.9.0-android-sdk.zip
+          mkdir -p opencv-android-sdk
+          unzip -q opencv-android-sdk.zip -d opencv-android-sdk
+
+      - name: Configure local.properties
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+          echo "OpenCV_DIR=${GITHUB_WORKSPACE}/opencv-android-sdk/OpenCV-android-sdk/sdk/native/jni" >> local.properties
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Zipalign APK
+        run: |
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          "$BUILD_TOOLS/zipalign" -v -p 4 .build/app/outputs/apk/release/app-release-unsigned.apk app-release-aligned.apk
+
+      - name: Prepare release directory
+        run: mkdir -p release
+
+      - name: Generate ephemeral release keystore
+        run: |
+          keytool -genkeypair -v -keystore release.jks -storepass android -keypass android -alias release \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=EdgeViewer, OU=CI, O=EdgeViewer, L=City, S=State, C=US"
+
+      - name: Sign APK
+        run: |
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          "$BUILD_TOOLS/apksigner" sign --ks release.jks --ks-pass pass:android --key-pass pass:android --ks-key-alias release \
+            --out release/FlamEdge_${{ github.ref_name }}.apk app-release-aligned.apk
+
+      - name: Verify signed APK
+        run: |
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          "$BUILD_TOOLS/apksigner" verify --print-certs release/FlamEdge_${{ github.ref_name }}.apk
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release/FlamEdge_${{ github.ref_name }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
